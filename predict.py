@@ -1,4 +1,4 @@
-from PIL import ImageDraw
+from PIL import ImageDraw, Image, ImageOps
 import numpy as np
 import matplotlib.pyplot as plt
 import os
@@ -28,8 +28,9 @@ warnings.filterwarnings("ignore", category=UserWarning)
 #########################################################################################################
 ts_img_path = './data/test_in/'
 model_type = 'vit_b'
-checkpoint = './pretrained_model/tonguesam.pth'
-device = 'cuda:1'
+checkpoint = './logs/best.pth'  # 使用训练好的模型
+# checkpoint = './pretrained_model/sam.pth'  # 使用预训练模型
+device = 'cuda:0'
 path_out='./data/test_out/'
 segment=YOLOX()
 ##############################################################################################################
@@ -73,8 +74,18 @@ val_gts=[]
 val_preds=[]
 for f in os.listdir(ts_img_path):   
     with torch.no_grad():             
-        image_data = io.imread(join(ts_img_path, f))
+        # image_data = io.imread(join(ts_img_path, f))
+        # Use PIL to load and handle EXIF orientation
+        try:
+            pil_image = Image.open(join(ts_img_path, f))
+            pil_image = ImageOps.exif_transpose(pil_image)
+            image_data = np.array(pil_image)
+        except Exception as e:
+            print(f"Error loading image with PIL: {e}, falling back to skimage")
+            image_data = io.imread(join(ts_img_path, f))
     
+        print(image_data.shape)
+
         if image_data.shape[-1] > 3 and len(image_data.shape) == 3:
             image_data = image_data[:, :, :3]
         if len(image_data.shape) == 2:

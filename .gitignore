@@ -1,0 +1,5 @@
+/data/
+/.venv/
+/__pycache__/
+/logs/best.pth
+/pretrained_model/sam.pth

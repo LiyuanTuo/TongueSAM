@@ -127,7 +127,7 @@ class YOLOX(object):
             return result
     def generate(self, onnx=False):
         self.net    = YoloBody(self.num_classes, self.phi)
-        device      = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+        device      = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         self.net.load_state_dict(torch.load(self.model_path, map_location=device))
         self.net    = self.net.eval()
         # print('{} model, and classes loaded.'.format(self.model_path))

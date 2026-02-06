@@ -1,3 +1,5 @@
+import matplotlib
+matplotlib.use('Agg')  # 使用非交互式后端，避免 Tkinter 错误
 import numpy as np
 import matplotlib.pyplot as plt
 import os
@@ -12,6 +14,7 @@ from segment_anything.utils.transforms import ResizeLongestSide
 from utils.SurfaceDice import compute_dice_coefficient
 import cv2
 from sklearn.metrics import accuracy_score, confusion_matrix, precision_score, recall_score, f1_score, jaccard_score
+from monai.losses import DiceCELoss
 # set seeds
 torch.manual_seed(2023)
 np.random.seed(2023)
@@ -24,14 +27,14 @@ import math
 from functools import partial
 ##############################################################################################################
 num_epochs = 10
-ts_npz_path='/home/cs/project/medsam_tongue/data/tongueset3_npz/test/'
-npz_tr_path = '/home/cs/project/medsam_tongue/data/tongue_train_npz/'
+ts_npz_path='./data/test_npz/'
+npz_tr_path = './data/train_npz/'
 model_type = 'vit_b'
-checkpoint = '/home/cs/project/medsam_tongue/pretrained_model/final.pth'
-device = 'cuda:1'
+checkpoint = './pretrained_model/sam.pth'
+device = 'cuda:0'
 model_save_path = './logs/'
-if_save=False
-if_onlytest=True
+if_save=True
+if_onlytest=False
 batch_size=32
 prompt_type='no'
 lr_decay_type= "cos"
@@ -103,12 +106,18 @@ class NpzDataset(Dataset):
             
         else:
             y_indices, x_indices = np.where(gt2D > 0)
-            x_min, x_max = np.min(x_indices), np.max(x_indices)
-            y_min, y_max = np.min(y_indices), np.max(y_indices)                   
-            bboxes = np.array([x_min, y_min, x_max, y_max])  
-            points=np.where(gt2D > 0)                        
-            random_points = random.choices(range(len(points[0])), k=self.point_num)            
-            random_points = [(points[0][i], points[1][i]) for i in random_points]              
+            # 处理空 mask 的情况（全黑图片）
+            if len(x_indices) == 0 or len(y_indices) == 0:
+                x_min, x_max = 0, W - 1
+                y_min, y_max = 0, H - 1
+                random_points = [(H // 2, W // 2)] * self.point_num
+            else:
+                x_min, x_max = np.min(x_indices), np.max(x_indices)
+                y_min, y_max = np.min(y_indices), np.max(y_indices)                   
+                points = np.where(gt2D > 0)                        
+                random_points = random.choices(range(len(points[0])), k=self.point_num)            
+                random_points = [(points[0][i], points[1][i]) for i in random_points]
+            bboxes = np.array([x_min, y_min, x_max, y_max])
 
         return torch.tensor(img_embed).float(), torch.tensor(gt2D[None, :,:]).long(), torch.tensor(bboxes).float(),torch.tensor(img).float(),torch.tensor(random_points).float()
 #####################################################Begin############################################################################
@@ -126,7 +135,7 @@ best_acc=0
 
 
 sam_model = sam_model_registry[model_type](checkpoint=checkpoint).to(device)
-seg_loss = monai.losses.DiceCELoss(sigmoid=True, squared_pred=True, reduction='mean')#%% train
+seg_loss = DiceCELoss(sigmoid=True, squared_pred=True, reduction='mean')  # %% train
 os.makedirs(model_save_path, exist_ok=True)
 
 for epoch in range(num_epochs):  
@@ -164,21 +173,22 @@ for epoch in range(num_epochs):
                         points=None,
                         boxes=None,
                         masks=None,
-                    )     
-            mask_predictions, _ = sam_model.mask_decoder(
-                image_embeddings=image_embedding.to(device), # (B, 256, 64, 64)
-                image_pe=sam_model.prompt_encoder.get_dense_pe(), # (1, 256, 64, 64)
-                sparse_prompt_embeddings=sparse_embeddings, # (B, 2, 256)
-                dense_prompt_embeddings=dense_embeddings, # (B, 256, 64, 64)
-                multimask_output=False,
+                    )
+                # 以下代码必须在 for step 循环内！
+                mask_predictions, _ = sam_model.mask_decoder(
+                    image_embeddings=image_embedding.to(device), # (B, 256, 64, 64)
+                    image_pe=sam_model.prompt_encoder.get_dense_pe(), # (1, 256, 64, 64)
+                    sparse_prompt_embeddings=sparse_embeddings, # (B, 2, 256)
+                    dense_prompt_embeddings=dense_embeddings, # (B, 256, 64, 64)
+                    multimask_output=False,
                 )                                                                                          
-            for i in range(mask_predictions.shape[0]):
-                mask = mask_predictions[i]
-                mask = mask.cpu().detach().numpy().squeeze()
-                mask = cv2.resize((mask > 0.5).astype(np.uint8),(gt2D.shape[2], gt2D.shape[3]))                                                      
-                gt_data=gt2D[i].cpu().numpy().astype(np.uint8)                 
-                val_gts.append(gt_data.astype(np.uint8))
-                val_preds.append(mask.astype(np.uint8))                          
+                for i in range(mask_predictions.shape[0]):
+                    mask = mask_predictions[i]
+                    mask = mask.cpu().detach().numpy().squeeze()
+                    mask = cv2.resize((mask > 0.5).astype(np.uint8),(gt2D.shape[3], gt2D.shape[2]))                                                      
+                    gt_data=gt2D[i].cpu().numpy().astype(np.uint8)                 
+                    val_gts.append(gt_data.astype(np.uint8))
+                    val_preds.append(mask.astype(np.uint8))                          
         iou,pa,acc=compute_mIoU(val_gts,val_preds) 
         if  iou> best_iou:
             best_iou=iou            
@@ -225,33 +235,30 @@ for epoch in range(num_epochs):
                         points=None,
                         boxes=None,
                         masks=None,
-                    )                        
-        mask_predictions, _ = sam_model.mask_decoder(
-            image_embeddings=image_embedding.to(device), # (B, 256, 64, 64)
-            image_pe=sam_model.prompt_encoder.get_dense_pe(), # (1, 256, 64, 64)
-            sparse_prompt_embeddings=sparse_embeddings, # (B, 2, 256)
-            dense_prompt_embeddings=dense_embeddings, # (B, 256, 64, 64)
-            multimask_output=False,
-            )            
-        mask_predictions= F.interpolate(mask_predictions, size=(gt2D.shape[2],gt2D.shape[3]), mode='bilinear', align_corners=False)       
-        gt2D=gt2D.to(device)       
-        loss = seg_loss(mask_predictions, gt2D)
-        optimizer.zero_grad()        
-        loss.backward()        
-        optimizer.step()    
+                    )
+            # 以下代码必须在 for step 循环内！
+            mask_predictions, _ = sam_model.mask_decoder(
+                image_embeddings=image_embedding.to(device), # (B, 256, 64, 64)
+                image_pe=sam_model.prompt_encoder.get_dense_pe(), # (1, 256, 64, 64)
+                sparse_prompt_embeddings=sparse_embeddings, # (B, 2, 256)
+                dense_prompt_embeddings=dense_embeddings, # (B, 256, 64, 64)
+                multimask_output=False,
+            )
+            mask_predictions = F.interpolate(mask_predictions, size=(gt2D.shape[2],gt2D.shape[3]), mode='bilinear', align_corners=False)
+            gt2D = gt2D.to(device).float()
+            loss = seg_loss(mask_predictions, gt2D)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+    train_losses.append(epoch_loss)    
 ################################################################################################################################  
 if if_onlytest is False:
+    plt.figure()
     plt.plot(train_losses)
     plt.title('Train Loss')
     plt.xlabel('Epoch')
     plt.ylabel('train_loss')
-    plt.show() 
     plt.savefig(join(model_save_path, 'train_loss.png'))
     plt.close()
-    plt.plot(val_losses)
-    plt.title('Val Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('val_loss')
-    plt.show() 
-    plt.savefig(join(model_save_path, 'val_loss.png'))
-    plt.close()
+    print(f'Training complete! Best mIoU: {best_iou:.2f}%')
