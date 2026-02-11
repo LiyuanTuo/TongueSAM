@@ -82,9 +82,11 @@ for f in os.listdir(ts_img_path):
             image_data = np.array(pil_image)
         except Exception as e:
             print(f"Error loading image with PIL: {e}, falling back to skimage")
-            image_data = io.imread(join(ts_img_path, f))
+            image_data = np.array(Image.open(join(ts_img_path, f)))
     
         print(image_data.shape)
+
+        image_data = transform.resize(image_data, (400, 400), order=3, preserve_range=True, mode='constant', anti_aliasing=True)  # type is np.ndarray dtype is float64
 
         if image_data.shape[-1] > 3 and len(image_data.shape) == 3:
             image_data = image_data[:, :, :3]
@@ -94,9 +96,10 @@ for f in os.listdir(ts_img_path):
         lower_bound, upper_bound = np.percentile(image_data, 0.5), np.percentile(image_data, 99.5)
         image_data_pre = np.clip(image_data, lower_bound, upper_bound)
         image_data_pre = (image_data_pre - np.min(image_data_pre)) / (np.max(image_data_pre) - np.min(image_data_pre)) * 255.0
-        image_data_pre[image_data == 0] = 0
-        image_data_pre = transform.resize(image_data_pre, (400, 400), order=3, preserve_range=True, mode='constant', anti_aliasing=True)
+        image_data_pre[image_data == 0] = 0 # there the image_data_pre is np type
+        
         image_data_pre = np.uint8(image_data_pre)
+
         
         H, W, _ = image_data_pre.shape
         sam_transform = ResizeLongestSide(sam_model.image_encoder.img_size)
@@ -113,7 +116,8 @@ for f in os.listdir(ts_img_path):
             box = sam_trans.apply_boxes(boxes, (400,400))                                                
             box_torch = torch.as_tensor(box, dtype=torch.float, device=device)            
         else:            
-            box_torch = None                
+            box_torch = None     
+
         sparse_embeddings, dense_embeddings = sam_model.prompt_encoder(
             points=None,
             boxes=box_torch,
@@ -133,29 +137,36 @@ for f in os.listdir(ts_img_path):
         
         medsam_seg=cv2.resize(medsam_seg,(400,400))       
         
+        ####################################
+        medsam_seg[medsam_seg > 0] = 255
+        medsam_seg = Image.fromarray(medsam_seg)
+        medsam_seg.save(path_out + os.path.splitext(f)[0] + '.png') #为什么会少四张图
+
+        ####################################
         
-        pred = cv2.Canny(cv2.resize((medsam_seg != 0).astype(np.uint8) * 255, (400, 400)), 100, 200)
+        # pred = cv2.Canny(cv2.resize((medsam_seg != 0).astype(np.uint8) * 255, (400, 400)), 100, 200)
         
-        for i in range(pred.shape[0]):
-            for j in range(pred.shape[1]):
-                if pred[i, j] != 0:
-                    img[max(i - 1, 0):min(i + 2, 400), max(j - 1, 0):min(j + 2, 400), :] = [0, 0, 255]
 
-        image1 = Image.fromarray(medsam_seg)
-        image2 = Image.fromarray(img)
+        # for i in range(pred.shape[0]):
+        #     for j in range(pred.shape[1]):
+        #         if pred[i, j] != 0:
+        #             img[max(i - 1, 0):min(i + 2, 400), max(j - 1, 0):min(j + 2, 400), :] = [0, 0, 255]
 
-        image1 = image1.resize(image2.size).convert("RGBA")
-        image2 = image2.convert("RGBA")
-        data1 = image1.getdata()
+        # image1 = Image.fromarray(medsam_seg)
+        # image2 = Image.fromarray(img)
 
-        new_image = Image.new("RGBA", image2.size)
-        new_data = [(0, 0, 128, 96) if pixel1[0] != 0 else (0, 0, 0, 0) for pixel1 in data1]
+        # image1 = image1.resize(image2.size).convert("RGBA")
+        # image2 = image2.convert("RGBA")
+        # data1 = image1.getdata()
 
-        new_image.putdata(new_data)
-        if boxes is not None:              
-            draw = ImageDraw.Draw(image2)
-            draw.rectangle([boxes[0],boxes[1],boxes[2],boxes[3]],fill=None, outline=(0, 255, 0), width=5)  # 用红色绘制方框的边框，线宽为2
-        image2.paste(new_image, (0, 0), mask=new_image)
-        image2.save(path_out + f.split('.')[0] + '.png')
-        print(f)
+        # new_image = Image.new("RGBA", image2.size)
+        # new_data = [(0, 0, 128, 96) if pixel1[0] != 0 else (0, 0, 0, 0) for pixel1 in data1]
+
+        # new_image.putdata(new_data)
+        # if boxes is not None:              
+        #     draw = ImageDraw.Draw(image2)
+        #     draw.rectangle([boxes[0],boxes[1],boxes[2],boxes[3]],fill=None, outline=(0, 255, 0), width=5)  # 用红色绘制方框的边框，线宽为2
+        # image2.paste(new_image, (0, 0), mask=new_image)
+        # image2.save(path_out + f.split('.')[0] + '.png')
+        # print(f)
         

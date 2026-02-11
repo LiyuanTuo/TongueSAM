@@ -17,7 +17,6 @@ parser.add_argument('-gt', '--gt_path', type=str, required=True, help='path to t
 parser.add_argument('-o', '--npz_path', type=str, required=True, help='path to save the npz files')
 parser.add_argument('--data_name', type=str, default='tongue', help='dataset name')
 parser.add_argument('--image_size', type=int, default=400, help='image size')
-parser.add_argument('--img_name_suffix', type=str, default='.jpg', help='image name suffix')
 parser.add_argument('--label_id', type=int, default=1, help='label id')
 parser.add_argument('--model_type', type=str, default='vit_b', help='model type')
 parser.add_argument('--checkpoint', type=str, default='./pretrained_model/sam.pth', help='checkpoint')
@@ -83,7 +82,7 @@ def process_single_image(img_path, gt_path, image_name, gt_name, image_size, lab
         # gt_data = gt_data[top:top+crop_size, left:left+crop_size]
 
         # Random rotation (same angle for image and mask)
-        angle = np.random.uniform(-135, 135)
+        angle = np.random.uniform(-45, 45)
         image_data, gt_data = rotate_image_and_mask(image_data, gt_data, angle)
 
         image_data = cv2.resize(image_data, (image_size, image_size))
@@ -140,7 +139,11 @@ def deal_fast(img_path, gt_path, sam_model, sam_transform):
     batch_indices = []
     
     for idx, gt_name in enumerate(tqdm(names, desc="Loading images")):
-        image_name = gt_name.split('.')[0] + args.img_name_suffix
+        if gt_name.split('.')[-1] == 'bmp':
+            image_name = gt_name.split('.')[0] + '.bmp'
+        elif gt_name.split('.')[-1] == 'png':
+             image_name = gt_name.split('.')[0] + '.jpg' # 这个是跟据我的观察得到的规律
+
         try:
             image_data, gt_data, box = process_single_image(
                 img_path, gt_path, image_name, gt_name, 
