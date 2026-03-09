@@ -9,6 +9,7 @@ from segment_anything import sam_model_registry
 from segment_anything.utils.transforms import ResizeLongestSide
 import argparse
 import cv2
+from PIL import Image, ImageOps
 
 # set up the parser
 parser = argparse.ArgumentParser(description='preprocess grey and RGB images (fast version)')
@@ -16,8 +17,7 @@ parser.add_argument('-i', '--img_path', type=str, required=True, help='path to t
 parser.add_argument('-gt', '--gt_path', type=str, required=True, help='path to the ground truth (gt)')
 parser.add_argument('-o', '--npz_path', type=str, required=True, help='path to save the npz files')
 parser.add_argument('--data_name', type=str, default='tongue', help='dataset name')
-parser.add_argument('--image_size', type=int, default=400, help='image size')
-parser.add_argument('--label_id', type=int, default=1, help='label id')
+parser.add_argument('--image_size', type=int, default=1024, help='image size')
 parser.add_argument('--model_type', type=str, default='vit_b', help='model type')
 parser.add_argument('--checkpoint', type=str, default='./pretrained_model/sam.pth', help='checkpoint')
 parser.add_argument('--device', type=str, default='cuda:0', help='device')
@@ -57,44 +57,73 @@ def rotate_image_and_mask(image, mask, angle):
     )
     return image_rot, mask_rot
 
-
-def process_single_image(img_path, gt_path, image_name, gt_name, image_size, label_id, no_augment=True):
-    """Process a single image and return preprocessed data"""
-    gt_data = io.imread(join(gt_path, gt_name))
-    # DEBUG: Print unique values to verify label_id
-    # print(f"Processing {image_name}, GT unique: {np.unique(gt_data)}, Target label: {label_id}")
-
-    image_data = io.imread(join(img_path, image_name))
+def add_random_shadow(image_np):
+    """Add a random realistic soft shadow to the image."""
+    h, w = image_np.shape[:2]
+    num_vertices = np.random.randint(3, 6)
+    # 让多边形顶点可以超出图像边界，模仿从界外投射的阴影
+    pts = np.random.randint(-w//2, w + w//2, size=(num_vertices, 2)).astype(np.int32)
     
-    # Convert bool mask to uint8
-    if gt_data.dtype == bool:
-        gt_data = gt_data.astype(np.uint8)
+    shadow_canvas = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(shadow_canvas, [pts], 255)
+    
+    # 极大的高斯模糊核让阴影边缘变得非常柔和(模拟环境光的软投影)
+    shadow_mask = cv2.GaussianBlur(shadow_canvas, (101, 101), 0)
+    
+    # 决定阴影的暗度 (0.4 到 0.7之间，越低越暗)
+    intensity = np.random.uniform(0.4, 0.7)
+    shadow_mask_float = shadow_mask.astype(np.float32) / 255.0
+    
+    # 1.0表示不受影响，计算后形成遮罩平滑过渡
+    light_mask = 1.0 - (shadow_mask_float * (1.0 - intensity))
+    light_mask_3d = np.repeat(light_mask[:, :, np.newaxis], image_np.shape[2], axis=2)
+    
+    # 叠加带有透明度的遮罩
+    shadowed_image = image_np.astype(np.float32) * light_mask_3d
+    return np.clip(shadowed_image, 0, 255).astype(np.uint8)
+
+
+def process_single_image(img_path, gt_path, image_name, gt_name, image_size, no_augment=True):
+    """Process a single image and return preprocessed data"""
+
+    
+     # gt name should be the same as image name  gtdata 是二维的
+    gt_data = Image.open(join(gt_path, gt_name))
+    gt_data = ImageOps.exif_transpose(gt_data)
+    gt_data = np.array(gt_data)
+
+
+    image_data = Image.open(join(img_path, image_name))
+    image_data = ImageOps.exif_transpose(image_data)  
+    image_data = np.array(image_data)
+
+    if gt_data.ndim == 3:
+        gt_data = gt_data[:, :, 0]  # 取第一个通道作为gt数据，假设gt是单通道图像
     
     if no_augment:
         image_data, gt_data = simple_preprocess(image_data, gt_data, image_size)
     else:
         # Augmentation (rotation-focused)
-        h, w = image_data.shape[:2]
-        # crop_size = min(h, w, 300)
-        # top = np.random.randint(0, max(1, h - crop_size))
-        # left = np.random.randint(0, max(1, w - crop_size))
-        # image_data = image_data[top:top+crop_size, left:left+crop_size]
-        # gt_data = gt_data[top:top+crop_size, left:left+crop_size]
 
         # Random rotation (same angle for image and mask)
-        angle = np.random.uniform(-45, 45)
-        image_data, gt_data = rotate_image_and_mask(image_data, gt_data, angle)
+        # angle = np.random.uniform(-10, 10)
+        # image_data, gt_data = rotate_image_and_mask(image_data, gt_data, angle)
 
-        image_data = cv2.resize(image_data, (image_size, image_size))
-        gt_data = cv2.resize(gt_data, (image_size, image_size), interpolation=cv2.INTER_NEAREST)
+        #  TODO add real world shadow augmentation
+        image_data, gt_data = simple_preprocess(image_data, gt_data, image_size)
+
+        if np.random.rand() < 0.5:
+            image_data = add_random_shadow(image_data)
+
+
+    # 现在tonguemask 的大小一样了
+    tonguemask = (gt_data <= 128).astype(np.uint8)  # 二值化，舌头部分为1，其他部分为0
     
-    # Ensure gt is 2D
-    if len(gt_data.shape) == 3:
-        gt_data = gt_data[:, :, 0]
-    
-    # Binarize gt 
-    gt_data = (gt_data > 0).astype(np.uint8) # fixed this serious bug
-    # print(f"Post-Binarization unique: {np.unique(gt_data)}")
+
+
+    # Binarize gt   128 是舌苔 255 是背景 0 是舌体 但是我们只需要二值化的结果，所以把128的部分设置为1，其他部分设置为0
+    gt_data = (gt_data == 128).astype(np.uint8) # fixed this serious bug
+    # print(f"Post-Binarization unique: {np.unique(gt_data)}") 最大最小值应该是0和255 但只会有0和1 因为上面已经做了二值化了
     
     # Ensure image is RGB
     if len(image_data.shape) == 2:
@@ -119,12 +148,12 @@ def process_single_image(img_path, gt_path, image_name, gt_name, image_size, lab
     else:
         box = np.array([0, 0, image_size-1, image_size-1])
     
-    return image_data, gt_data, box
+    return image_data, gt_data, box, tonguemask
 
 
 def deal_fast(img_path, gt_path, sam_model, sam_transform):
     """Optimized processing with batch encoding"""
-    names = sorted(os.listdir(gt_path))
+    names = sorted(os.listdir(img_path))
     save_path = args.npz_path
     os.makedirs(save_path, exist_ok=True)
     print(f'Processing {len(names)} images...')
@@ -133,25 +162,24 @@ def deal_fast(img_path, gt_path, sam_model, sam_transform):
     gts = []
     boxes = []
     img_embeddings = []
-    
+    tonguemasks = []
+
     # Collect all preprocessed images first
     batch_images = []
     batch_indices = []
     
-    for idx, gt_name in enumerate(tqdm(names, desc="Loading images")):
-        if gt_name.split('.')[-1] == 'bmp':
-            image_name = gt_name.split('.')[0] + '.bmp'
-        elif gt_name.split('.')[-1] == 'png':
-             image_name = gt_name.split('.')[0] + '.jpg' # 这个是跟据我的观察得到的规律
+    for idx, image_name in enumerate(tqdm(names, desc="Loading images")):
+        gt_name = image_name
 
         try:
-            image_data, gt_data, box = process_single_image(
+            image_data, gt_data, box, tonguemask = process_single_image(
                 img_path, gt_path, image_name, gt_name, 
-                args.image_size, args.label_id, args.no_augment
+                args.image_size, args.no_augment
             )
             imgs.append(image_data)
             gts.append(gt_data)
             boxes.append(box)
+            tonguemasks.append(tonguemask)
             batch_images.append(image_data)
             batch_indices.append(idx)
         except Exception as e:
@@ -190,10 +218,11 @@ def deal_fast(img_path, gt_path, sam_model, sam_transform):
         gts = np.stack(gts, axis=0)
         img_embeddings = np.stack(img_embeddings, axis=0)
         boxes = np.array(boxes)
-        
+        tonguemasks = np.stack(tonguemasks, axis=0)
+
         save_file = join(save_path, f'{args.data_name}.npz')
 
-        np.savez_compressed(save_file, imgs=imgs, boxes=boxes, gts=gts, img_embeddings=img_embeddings)
+        np.savez_compressed(save_file, imgs=imgs, boxes=boxes, gts=gts, img_embeddings=img_embeddings, tonguemasks=tonguemasks)
         print(f'Saved to {save_file}')
         print(f'  imgs: {imgs.shape}, gts: {gts.shape}, embeddings: {img_embeddings.shape}')
     else:

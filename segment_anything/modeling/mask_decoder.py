@@ -104,8 +104,9 @@ class MaskDecoder(nn.Module):
         else:
             mask_slice = slice(0, 1)
         masks = masks[:, mask_slice, :, :]
-        iou_pred = iou_pred[:, mask_slice]                
-        masks=torch.sigmoid(masks.view(masks.shape[0], 1, -1)).view(masks.shape[0], 1, 256, 256)        
+        iou_pred = iou_pred[:, mask_slice]
+        # 不在此处做 sigmoid！交由 loss 函数(sigmoid=True) 统一处理，
+        # 否则会出现 "double sigmoid" 导致梯度消失、模型坍塌
         return masks, iou_pred
 
     def predict_masks(

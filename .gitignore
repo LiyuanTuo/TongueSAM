@@ -3,3 +3,6 @@
 /__pycache__/
 /logs/best.pth
 /pretrained_model/sam.pth
+/compair
+/imgraw
+/tonguemask

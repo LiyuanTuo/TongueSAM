@@ -36,7 +36,7 @@ model_save_path = './logs/'
 if_save=True
 if_onlytest=False
 batch_size=32
-prompt_type='no'
+prompt_type='mask'
 lr_decay_type= "cos"
 Init_lr= 1e-4
 point_num=3
@@ -77,11 +77,12 @@ def get_lr_scheduler(lr_decay_type, lr, min_lr, total_iters, warmup_iters_ratio 
 class NpzDataset(Dataset): 
     def __init__(self, data_root):            
         self.npz_data=np.load(data_root)
-        self.ori_gts = self.npz_data['gts']
+        self.ori_gts = self.npz_data['gts']  # 这里已经能保证gt 中 1 是 舌苔 0 是其他
         self.img_embeddings = self.npz_data['img_embeddings']
         self.imgs=self.npz_data['imgs']
         self.model=segment        
         self.point_num=point_num
+        self.tonguemask = self.npz_data['tonguemasks']
     def __len__(self):
         return self.ori_gts.shape[0]
 
@@ -90,36 +91,10 @@ class NpzDataset(Dataset):
         gt2D = self.ori_gts[index]
         img=self.imgs[index]
         H, W = gt2D.shape         
-        
-# ############################box##############################################################        
-        if self.model!=None:                        
-            img=Image.fromarray(img)
-            img= self.model.get_miou_png(img)                                                      
-            y_indices, x_indices = np.where(img > 0)            
-            x_min, x_max = np.min(x_indices), np.max(x_indices)
-            y_min, y_max = np.min(y_indices), np.max(y_indices) 
-            bboxes = np.array([x_min, y_min, x_max, y_max])
-            bboxes=np.array([x_min,y_min,x_max,y_max]) 
-            points=np.where(img > 0)                        
-            random_points = random.choices(range(len(points[0])), k=self.point_num)            
-            random_points = [(points[0][i], points[1][i]) for i in random_points]
-            
-        else:
-            y_indices, x_indices = np.where(gt2D > 0)
-            # 处理空 mask 的情况（全黑图片）
-            if len(x_indices) == 0 or len(y_indices) == 0:
-                x_min, x_max = 0, W - 1
-                y_min, y_max = 0, H - 1
-                random_points = [(H // 2, W // 2)] * self.point_num
-            else:
-                x_min, x_max = np.min(x_indices), np.max(x_indices)
-                y_min, y_max = np.min(y_indices), np.max(y_indices)                   
-                points = np.where(gt2D > 0)                        
-                random_points = random.choices(range(len(points[0])), k=self.point_num)            
-                random_points = [(points[0][i], points[1][i]) for i in random_points]
-            bboxes = np.array([x_min, y_min, x_max, y_max])
-
-        return torch.tensor(img_embed).float(), torch.tensor(gt2D[None, :,:]).long(), torch.tensor(bboxes).float(),torch.tensor(img).float(),torch.tensor(random_points).float()
+    
+           
+        tongue_mask_256 = cv2.resize(self.tonguemask[index].astype(np.float32), (256, 256), interpolation=cv2.INTER_NEAREST)
+        return torch.tensor(img_embed).float(), torch.tensor(gt2D[None, :,:]).long(), torch.tensor(tongue_mask_256[None,:,:]).float()
 #####################################################Begin############################################################################
 Min_lr=Init_lr*0.01
 lr_limit_max    = Init_lr 
@@ -137,6 +112,7 @@ best_acc=0
 sam_model = sam_model_registry[model_type](checkpoint=checkpoint).to(device)
 seg_loss = DiceCELoss(sigmoid=True, squared_pred=True, reduction='mean')  # %% train
 os.makedirs(model_save_path, exist_ok=True)
+optimizer = torch.optim.Adam(sam_model.mask_decoder.parameters(), lr=Init_lr_fit, weight_decay=0)
 
 for epoch in range(num_epochs):  
     print(f'EPOCH: {epoch}')   
@@ -149,30 +125,12 @@ for epoch in range(num_epochs):
         for f in os.listdir(ts_npz_path):                             
             ts_dataset = NpzDataset(join(ts_npz_path,f))            
             ts_dataloader = DataLoader(ts_dataset, batch_size=batch_size, shuffle=True)
-            for step, (image_embedding, gt2D, boxes,img,points) in enumerate(ts_dataloader):                                                                                                                           
-                if prompt_type=='box':                
-                    box_np = boxes.numpy()
-                    sam_trans = ResizeLongestSide(sam_model.image_encoder.img_size)                                        
-                    box = sam_trans.apply_boxes(box_np, (img.shape[-2], img.shape[-1]))                                        
-                    box_torch = torch.as_tensor(box, dtype=torch.float, device=device)
-                    if len(box_torch.shape) == 2:
-                        box_torch = box_torch[:, None, :]                                                           
-                    sparse_embeddings, dense_embeddings = sam_model.prompt_encoder(                        
-                        points=None,
-                        boxes=box_torch,
-                        masks=None,
-                    )         
-                elif prompt_type=='point':                                                                               
-                    sparse_embeddings, dense_embeddings = sam_model.prompt_encoder(
-                        points=points,
-                        boxes=None,
-                        masks=None,
-                    )         
-                elif prompt_type=='no':  
+            for step, (image_embedding, gt2D, tonguemask) in enumerate(ts_dataloader):                                                                                                                           
+                if prompt_type=='mask':  
                     sparse_embeddings, dense_embeddings = sam_model.prompt_encoder(
                         points=None,
                         boxes=None,
-                        masks=None,
+                        masks=tonguemask.to(device),
                     )
                 # 以下代码必须在 for step 循环内！
                 mask_predictions, _ = sam_model.mask_decoder(
@@ -185,10 +143,19 @@ for epoch in range(num_epochs):
                 for i in range(mask_predictions.shape[0]):
                     mask = mask_predictions[i]
                     mask = mask.cpu().detach().numpy().squeeze()
-                    mask = cv2.resize((mask > 0.5).astype(np.uint8),(gt2D.shape[3], gt2D.shape[2]))                                                      
+                    # 调试：打印第一个epoch第一个batch的logit范围和GT分布
+                    if epoch == 0 and step == 0 and i == 0:
+                        print(f"[DEBUG] logit range: [{mask.min():.4f}, {mask.max():.4f}]")
+                        print(f"[DEBUG] gt unique: {np.unique(gt2D[i].cpu().numpy())}")
+                    mask = cv2.resize((mask > 0).astype(np.uint8),(gt2D.shape[3], gt2D.shape[2]))  # logit > 0 等价于 sigmoid(logit) > 0.5                                                      
                     gt_data=gt2D[i].cpu().numpy().astype(np.uint8)                 
                     val_gts.append(gt_data.astype(np.uint8))
                     val_preds.append(mask.astype(np.uint8))                          
+            # 解决内存泄漏：每遍历完一个npz文件，手动关闭并强制回收内存
+            ts_dataset.npz_data.close()
+            del ts_dataset, ts_dataloader
+            import gc
+            gc.collect()
         iou,pa,acc=compute_mIoU(val_gts,val_preds) 
         if  iou> best_iou:
             best_iou=iou            
@@ -206,35 +173,18 @@ for epoch in range(num_epochs):
 ###############################################################Train##################################################################
     sam_model.train()
     lr = lr_scheduler_func(epoch)    
-    optimizer = torch.optim.Adam(sam_model.mask_decoder.parameters(), lr,weight_decay=0)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
     for f in os.listdir(npz_tr_path):                                     
         train_dataset = NpzDataset(join(npz_tr_path,f))
         train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        for step, (image_embedding, gt2D, boxes,img,points) in enumerate(train_dataloader):                                                
+        for step, (image_embedding, gt2D, tonguemask) in enumerate(train_dataloader):                                                
             with torch.no_grad():
-                if prompt_type=='box':                                                                            
-                    box_np = boxes.numpy()
-                    sam_trans = ResizeLongestSide(sam_model.image_encoder.img_size)
-                    box = sam_trans.apply_boxes(box_np, (img.shape[-2], img.shape[-1]))
-                    box_torch = torch.as_tensor(box, dtype=torch.float, device=device)
-                    if len(box_torch.shape) == 2:
-                        box_torch = box_torch[:, None, :]
-                    sparse_embeddings, dense_embeddings = sam_model.prompt_encoder(
-                        points=None,
-                        boxes=box_torch,
-                        masks=None,
-                    )         
-                elif prompt_type=='point':
-                    sparse_embeddings, dense_embeddings = sam_model.prompt_encoder(
-                    points=points,
-                    boxes=None,
-                    masks=None,
-                    )   
-                elif prompt_type=='no':  
+                if prompt_type=='mask':  
                     sparse_embeddings, dense_embeddings = sam_model.prompt_encoder(
                         points=None,
                         boxes=None,
-                        masks=None,
+                        masks=tonguemask.to(device),
                     )
             # 以下代码必须在 for step 循环内！
             mask_predictions, _ = sam_model.mask_decoder(
@@ -247,10 +197,30 @@ for epoch in range(num_epochs):
             mask_predictions = F.interpolate(mask_predictions, size=(gt2D.shape[2],gt2D.shape[3]), mode='bilinear', align_corners=False)
             gt2D = gt2D.to(device).float()
             loss = seg_loss(mask_predictions, gt2D)
+            # 调试：打印每个epoch的第一个batch的loss和梯度信息
+            if step == 0:
+                print(f"  [TRAIN] epoch={epoch} lr={lr:.6f} loss={loss.item():.6f}")
+                print(f"  [TRAIN] pred range: [{mask_predictions.min().item():.4f}, {mask_predictions.max().item():.4f}]")
+                print(f"  [TRAIN] gt sum: {gt2D.sum().item():.0f} / {gt2D.numel()} ({gt2D.sum().item()/gt2D.numel()*100:.1f}%)")
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(sam_model.mask_decoder.parameters(), max_norm=1.0)  # 梯度裁剪，防止权重爆炸
+            # 调试：检查梯度是否存在
+            if step == 0:
+                total_grad = 0
+                for p in sam_model.mask_decoder.parameters():
+                    if p.grad is not None:
+                        total_grad += p.grad.abs().mean().item()
+                print(f"  [TRAIN] avg grad magnitude: {total_grad:.8f}")
             optimizer.step()
             epoch_loss += loss.item()
+        
+        # 解决内存泄漏：手动关闭释放底层大数组，避免撑爆内存 (OOM)
+        train_dataset.npz_data.close()
+        del train_dataset, train_dataloader
+        import gc
+        gc.collect()
+
     train_losses.append(epoch_loss)    
 ################################################################################################################################  
 if if_onlytest is False:

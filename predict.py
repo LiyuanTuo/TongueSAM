@@ -86,7 +86,7 @@ for f in os.listdir(ts_img_path):
     
         print(image_data.shape)
 
-        image_data = transform.resize(image_data, (400, 400), order=3, preserve_range=True, mode='constant', anti_aliasing=True)  # type is np.ndarray dtype is float64
+        image_data = transform.resize(image_data, (1024, 1024), order=3, preserve_range=True, mode='constant', anti_aliasing=True)  # type is np.ndarray dtype is float64
 
         if image_data.shape[-1] > 3 and len(image_data.shape) == 3:
             image_data = image_data[:, :, :3]
@@ -95,13 +95,14 @@ for f in os.listdir(ts_img_path):
         
         lower_bound, upper_bound = np.percentile(image_data, 0.5), np.percentile(image_data, 99.5)
         image_data_pre = np.clip(image_data, lower_bound, upper_bound)
-        image_data_pre = (image_data_pre - np.min(image_data_pre)) / (np.max(image_data_pre) - np.min(image_data_pre)) * 255.0
+        image_data_pre = (image_data_pre - np.min(image_data_pre)) / (np.max(image_data_pre) - np.min(image_data_pre)) * 255.0  # normalize this image to 0-255 range
         image_data_pre[image_data == 0] = 0 # there the image_data_pre is np type
         
         image_data_pre = np.uint8(image_data_pre)
 
         
-        H, W, _ = image_data_pre.shape
+        # sam 模型的输入尺寸是1024x1024，所以我们需要将输入图像调整为这个尺寸。ResizeLongestSide会保持图像的宽高比，并将较长的一边调整为指定的尺寸，同时较短的一边会自动调整以保持比例。
+        # print("SAM模型的 img_size 是:", sam_model.image_encoder.img_size) 
         sam_transform = ResizeLongestSide(sam_model.image_encoder.img_size)
         resize_img = sam_transform.apply_image(image_data_pre)
         resize_img_tensor = torch.as_tensor(resize_img.transpose(2, 0, 1)).to(device)
@@ -109,19 +110,27 @@ for f in os.listdir(ts_img_path):
         ts_img_embedding = sam_model.image_encoder(input_image)      
 
         img = image_data_pre
-        boxes = segment.get_prompt(img)
-                
+        # boxes = segment.get_prompt(img)  # 这里要关注一下sam 接受多少种不同的 prompt 我想用mask看能不能传进去
+        boxes = None
+        
+        tongue_mask = np.array(ImageOps.exif_transpose(Image.open("../舌苔抑郁症/coating_mask/" + os.path.splitext(f)[0] + ".png")))  
+
+        tongue_mask = (np.array(tongue_mask) > 0).astype(np.float32)  # 二值化  变成 0和1的形式，舌头部分为1，其他部分为0  主要是为了适配sam模型的输入要求，sam模型的prompt_encoder需要一个二值化的mask作为输入， 而且不宜是0 255 因为太大了
+        tongue_mask_256 = cv2.resize(tongue_mask, (256, 256), interpolation=cv2.INTER_NEAREST)
+        mask_torch = torch.as_tensor(tongue_mask_256[None, None, :, :], dtype=torch.float, device=device)
+
+
         if boxes is not None:
             sam_trans = ResizeLongestSide(sam_model.image_encoder.img_size)                   
-            box = sam_trans.apply_boxes(boxes, (400,400))                                                
+            box = sam_trans.apply_boxes(boxes, (1024,1024))                                 # sam_trans会自动调整box的坐标以适应sam模型的输入尺寸               
             box_torch = torch.as_tensor(box, dtype=torch.float, device=device)            
         else:            
             box_torch = None     
 
         sparse_embeddings, dense_embeddings = sam_model.prompt_encoder(
             points=None,
-            boxes=box_torch,
-            masks=None,
+            boxes=box_torch, # box_torch是None
+            masks=mask_torch,
         )
         
         # 使用Mask_Decoder生成分割结果
@@ -133,40 +142,38 @@ for f in os.listdir(ts_img_path):
             multimask_output=False,
         )                        
         medsam_seg_prob =medsam_seg_prob.cpu().detach().numpy().squeeze()        
-        medsam_seg = (medsam_seg_prob > 0.5).astype(np.uint8)
+        medsam_seg = (medsam_seg_prob > 0).astype(np.uint8)  # logit > 0 等价于 sigmoid(logit) > 0.5
         
-        medsam_seg=cv2.resize(medsam_seg,(400,400))       
+        medsam_seg=cv2.resize(medsam_seg,(1024,1024),interpolation=cv2.INTER_NEAREST)       
         
         ####################################
         medsam_seg[medsam_seg > 0] = 255
-        medsam_seg = Image.fromarray(medsam_seg)
-        medsam_seg.save(path_out + os.path.splitext(f)[0] + '.png') #为什么会少四张图
+        medsam_img = Image.fromarray(medsam_seg) # 所有输出的图片的位数都是8位的png图像
+        medsam_img.save(os.path.join(path_out, os.path.splitext(f)[0] + '.png'))
 
         ####################################
+        # 后面这一部分代码就是为了在原图上叠加边界框和分割结果的可视化，输出到test_out文件夹中
+        pred = cv2.Canny(medsam_seg, 100, 200)
         
-        # pred = cv2.Canny(cv2.resize((medsam_seg != 0).astype(np.uint8) * 255, (400, 400)), 100, 200)
-        
 
-        # for i in range(pred.shape[0]):
-        #     for j in range(pred.shape[1]):
-        #         if pred[i, j] != 0:
-        #             img[max(i - 1, 0):min(i + 2, 400), max(j - 1, 0):min(j + 2, 400), :] = [0, 0, 255]
+        for i in range(pred.shape[0]):
+            for j in range(pred.shape[1]):
+                if pred[i, j] != 0:
+                    img[max(i - 1, 0):min(i + 2, 1024), max(j - 1, 0):min(j + 2, 1024), :] = [0, 0, 255]
 
-        # image1 = Image.fromarray(medsam_seg)
-        # image2 = Image.fromarray(img)
+        image1 = Image.fromarray(medsam_seg)
+        image2 = Image.fromarray(img)
 
-        # image1 = image1.resize(image2.size).convert("RGBA")
-        # image2 = image2.convert("RGBA")
-        # data1 = image1.getdata()
+        image1 = image1.resize(image2.size).convert("RGBA")
+        image2 = image2.convert("RGBA")
+        data1 = image1.getdata()
 
-        # new_image = Image.new("RGBA", image2.size)
-        # new_data = [(0, 0, 128, 96) if pixel1[0] != 0 else (0, 0, 0, 0) for pixel1 in data1]
+        new_image = Image.new("RGBA", image2.size)
+        new_data = [(0, 0, 128, 96) if pixel1[0] != 0 else (0, 0, 0, 0) for pixel1 in data1]
 
-        # new_image.putdata(new_data)
-        # if boxes is not None:              
-        #     draw = ImageDraw.Draw(image2)
-        #     draw.rectangle([boxes[0],boxes[1],boxes[2],boxes[3]],fill=None, outline=(0, 255, 0), width=5)  # 用红色绘制方框的边框，线宽为2
-        # image2.paste(new_image, (0, 0), mask=new_image)
-        # image2.save(path_out + f.split('.')[0] + '.png')
-        # print(f)
-        
+        new_image.putdata(new_data)
+        if boxes is not None:              
+            draw = ImageDraw.Draw(image2)
+            draw.rectangle([boxes[0],boxes[1],boxes[2],boxes[3]],fill=None, outline=(0, 255, 0), width=5)  # 用红色绘制方框的边框，线宽为2
+        image2.paste(new_image, (0, 0), mask=new_image)
+        image2.save(os.path.join(path_out, "vis_" + os.path.splitext(f)[0] + '.png'))
