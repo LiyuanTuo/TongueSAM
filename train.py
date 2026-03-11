@@ -26,7 +26,7 @@ import random
 import math
 from functools import partial
 ##############################################################################################################
-num_epochs = 10
+num_epochs = 15
 ts_npz_path='./data/test_npz/'
 npz_tr_path = './data/train_npz/'
 model_type = 'vit_b'
