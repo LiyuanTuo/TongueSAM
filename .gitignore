@@ -1,8 +1,9 @@
 /data/
 /.venv/
-/__pycache__/
+**/__pycache__/
 /logs/best.pth
 /pretrained_model/sam.pth
 /compair
 /imgraw
 /tonguemask
+/split.py

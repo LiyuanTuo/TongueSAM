@@ -82,7 +82,7 @@ class NpzDataset(Dataset):
         self.imgs=self.npz_data['imgs']
         self.model=segment        
         self.point_num=point_num
-        self.tonguemask = self.npz_data['tonguemasks']
+        self.tonguemasks = self.npz_data['tonguemasks']
     def __len__(self):
         return self.ori_gts.shape[0]
 
@@ -93,7 +93,7 @@ class NpzDataset(Dataset):
         H, W = gt2D.shape         
     
            
-        tongue_mask_256 = cv2.resize(self.tonguemask[index].astype(np.float32), (256, 256), interpolation=cv2.INTER_NEAREST)
+        tongue_mask_256 = cv2.resize(self.tonguemasks[index].astype(np.float32), (256, 256), interpolation=cv2.INTER_NEAREST)
         return torch.tensor(img_embed).float(), torch.tensor(gt2D[None, :,:]).long(), torch.tensor(tongue_mask_256[None,:,:]).float()
 #####################################################Begin############################################################################
 Min_lr=Init_lr*0.01

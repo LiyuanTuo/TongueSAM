@@ -19,7 +19,8 @@ parser.add_argument('-o', '--npz_path', type=str, required=True, help='path to s
 parser.add_argument('--data_name', type=str, default='tongue', help='dataset name')
 parser.add_argument('--image_size', type=int, default=1024, help='image size')
 parser.add_argument('--model_type', type=str, default='vit_b', help='model type')
-parser.add_argument('--checkpoint', type=str, default='./pretrained_model/sam.pth', help='checkpoint')
+# parser.add_argument('--checkpoint', type=str, default='./pretrained_model/sam.pth', help='checkpoint')
+parser.add_argument('--checkpoint', type=str, default='./log/best.pth', help='checkpoint')
 parser.add_argument('--device', type=str, default='cuda:0', help='device')
 parser.add_argument('--batch_size', type=int, default=4, help='batch size for SAM encoder')
 parser.add_argument('--no_augment', action='store_true', help='disable data augmentation for faster processing')
@@ -112,14 +113,12 @@ def process_single_image(img_path, gt_path, image_name, gt_name, image_size, no_
         #  TODO add real world shadow augmentation
         image_data, gt_data = simple_preprocess(image_data, gt_data, image_size)
 
-        if np.random.rand() < 0.5:
-            image_data = add_random_shadow(image_data)
+        image_data = add_random_shadow(image_data)
 
 
     # 现在tonguemask 的大小一样了
     tonguemask = (gt_data <= 128).astype(np.uint8)  # 二值化，舌头部分为1，其他部分为0
     
-
 
     # Binarize gt   128 是舌苔 255 是背景 0 是舌体 但是我们只需要二值化的结果，所以把128的部分设置为1，其他部分设置为0
     gt_data = (gt_data == 128).astype(np.uint8) # fixed this serious bug
@@ -139,6 +138,8 @@ def process_single_image(img_path, gt_path, image_name, gt_name, image_size, no_
         image_data = (image_data - image_data.min()) / (image_data.max() - image_data.min()) * 255.0
     image_data = np.uint8(image_data)
     
+    image_data[tonguemask == 0] = [0, 0, 0]  # 将非舌头区域像素值设为0，突出舌头部分  所以训练的时候就只训练了舌头部分，推理的时候自然也只推理舌头部分
+
     # Get bounding box from gt
     y_indices, x_indices = np.where(gt_data > 0)
     if len(x_indices) > 0:
